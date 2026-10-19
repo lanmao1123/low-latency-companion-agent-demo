@@ -37,6 +37,7 @@ class MockStreamingModel:
             import json
 
             raw = observation.split("TOOL_RESULT:", 1)[1].strip()
+            raw = raw.rsplit(" (tool_call_id:", 1)[0].strip()
             result = json.loads(raw)
             return (
                 f"当前时间是{result['display']}，{result['weekday']}。"
@@ -47,6 +48,7 @@ class MockStreamingModel:
             import json
 
             raw = observation.split("TOOL_RESULT:", 1)[1].strip()
+            raw = raw.rsplit(" (tool_call_id:", 1)[0].strip()
             result = json.loads(raw)
             action = "新增" if result["created"] else "更新"
             return (

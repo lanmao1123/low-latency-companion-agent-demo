@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -33,9 +34,37 @@ class CompanionAgentTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("tool_result", types)
         self.assertIn("token", types)
         self.assertIn("done", types)
-        self.assertEqual(events[types.index("tool_call")]["name"], "get_current_time")
+        tool_call = events[types.index("tool_call")]
+        tool_result = events[types.index("tool_result")]
+        self.assertEqual(tool_call["name"], "get_current_time")
+        self.assertEqual(tool_call["tool_call_id"], tool_result["tool_call_id"])
         reply = "".join(event["value"] for event in events if event["type"] == "token")
         self.assertIn("当前时间是", reply)
+
+    async def test_tool_timeout_returns_error_with_same_call_id(self):
+        original_execute = self.agent.tools.execute
+
+        def slow_execute(planned, user_id):
+            time.sleep(0.05)
+            return original_execute(planned, user_id)
+
+        self.agent.tools.execute = slow_execute
+        self.agent.tool_timeout_seconds = 0.01
+        try:
+            events = await collect(
+                self.agent.chat_stream(
+                    user_id="u7", session_id="s7", query="现在几点了？"
+                )
+            )
+        finally:
+            self.agent.tools.execute = original_execute
+            self.agent.tool_timeout_seconds = 2.0
+
+        types = [event["type"] for event in events]
+        tool_call = events[types.index("tool_call")]
+        tool_error = events[types.index("tool_error")]
+        self.assertEqual(tool_call["tool_call_id"], tool_error["tool_call_id"])
+        self.assertIn("timed out", tool_error["message"])
 
     async def test_multi_turn_and_long_term_memory(self):
         first = await collect(

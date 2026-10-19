@@ -73,7 +73,7 @@ event: tool_call
 data: {"type":"tool_call","tool_call_id":"call_xxx","name":"get_current_time","arguments":{"timezone":"Asia/Shanghai"},"intent":"用户询问客观时间事实。"}
 
 event: tool_result
-data: {"type":"tool_result","name":"get_current_time","result":{"timezone":"Asia/Shanghai","iso8601":"2026-10-19T09:00:45+08:00","display":"2026-10-19 09:00:45 CST","weekday":"周一"}}
+data: {"type":"tool_result","tool_call_id":"call_xxx","name":"get_current_time","result":{"timezone":"Asia/Shanghai","iso8601":"2026-10-19T09:00:45+08:00","display":"2026-10-19 09:00:45 CST","weekday":"周一"}}
 
 event: token
 data: {"type":"token","value":"当前时间是"}

@@ -15,6 +15,8 @@ from .tools import ToolExecutor, ToolPlanner
 
 
 class CompanionAgent:
+    tool_timeout_seconds = 2.0
+
     def __init__(self, memory_store: MemoryStore) -> None:
         self.memory = memory_store
         self.model = MockStreamingModel()
@@ -82,25 +84,47 @@ class CompanionAgent:
 
         planned = self.planner.plan(query)
         if planned:
+            tool_call_id = f"call_{uuid.uuid4().hex[:10]}"
             yield {
                 "type": "tool_call",
-                "tool_call_id": f"call_{uuid.uuid4().hex[:10]}",
+                "tool_call_id": tool_call_id,
                 "name": planned.name,
                 "arguments": planned.arguments,
                 "intent": planned.reason,
             }
             try:
-                result = await asyncio.to_thread(self.tools.execute, planned, user_id)
-                yield {"type": "tool_result", "name": planned.name, "result": result}
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(self.tools.execute, planned, user_id),
+                    timeout=self.tool_timeout_seconds,
+                )
+                yield {
+                    "type": "tool_result",
+                    "tool_call_id": tool_call_id,
+                    "name": planned.name,
+                    "result": result,
+                }
                 messages.append(
                     {
                         "role": "tool",
-                        "content": f"{planned.name} TOOL_RESULT: {json.dumps(result, ensure_ascii=False)}",
+                        "content": (
+                            f"{planned.name} TOOL_RESULT: "
+                            f"{json.dumps(result, ensure_ascii=False)} "
+                            f"(tool_call_id: {tool_call_id})"
+                        ),
                     }
                 )
+            except asyncio.TimeoutError:
+                yield {
+                    "type": "tool_error",
+                    "tool_call_id": tool_call_id,
+                    "name": planned.name,
+                    "message": "tool execution timed out",
+                    "fallback": "工具暂时不可用，我不会编造结果。",
+                }
             except Exception as exc:
                 yield {
                     "type": "tool_error",
+                    "tool_call_id": tool_call_id,
                     "name": planned.name,
                     "message": str(exc),
                     "fallback": "继续使用模型知识回答，并说明工具暂时不可用。",

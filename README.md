@@ -19,6 +19,7 @@ Demo 默认使用本地 `MockStreamingModel`，因此不需要 API Key、不调�
 - 工具调用：
   - `get_current_time`
   - `save_memory`
+  - `tool_call` / `tool_result` / `tool_error` 使用同一个 `tool_call_id`
 - SSE 事件：
   - `meta`
   - `tool_call`
@@ -101,5 +102,6 @@ curl -N -X POST http://127.0.0.1:8765/v1/chat/stream \
 
 - 模型层使用 `MockStreamingModel`，便于无 Key 本地复现。
 - Demo 的工具选择使用确定性 Planner；生产环境应替换为模型原生 Tool Calling。
+- Demo 只做本地工具超时，不实现生产级重试、幂等键和断线恢复。
 - 本地 `ttft_ms` 只代表 Mock 链路，不代表真实模型服务延时。
 - 生产环境应将 JSON 长期记忆替换为向量数据库加业务数据库，并补充权限、审计、熔断、压测和线上监控。
