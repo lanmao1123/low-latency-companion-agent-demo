@@ -7,6 +7,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -53,15 +54,18 @@ def extract_memory(query: str) -> tuple[str, str] | None:
     return content, kind
 
 
+def memory_key(content: str, kind: str) -> str:
+    normalized = re.sub(r"\s+", "", content).lower()
+    if content.startswith("我叫"):
+        return "profile:name"
+    return f"{kind}:{normalized}"
+
+
 def save_memory(user_id: str, content: str, kind: str) -> tuple[dict[str, object], bool]:
     rows = memories.setdefault(user_id, [])
+    key = memory_key(content, kind)
     for row in rows:
-        same_kind = row["kind"] == kind
-        same_topic = (
-            kind == "preference"
-            or (kind == "fact" and str(row["content"]).startswith("我叫") and content.startswith("我叫"))
-        )
-        if same_kind and (row["content"] == content or same_topic):
+        if row.get("memory_key") == key:
             if row["content"] != content:
                 row["content"] = content
                 row["version"] = int(row["version"]) + 1
@@ -69,6 +73,7 @@ def save_memory(user_id: str, content: str, kind: str) -> tuple[dict[str, object
 
     row = {
         "memory_id": f"mem_{uuid.uuid4().hex[:8]}",
+        "memory_key": key,
         "content": content,
         "kind": kind,
         "version": 1,
@@ -82,7 +87,7 @@ def recall_memory(user_id: str, query: str) -> list[dict[str, object]]:
     if "名字" in query:
         return [row for row in rows if row["kind"] == "fact" and str(row["content"]).startswith("我叫")][-1:]
     if "喜欢" in query or "讨厌" in query:
-        return [row for row in rows if row["kind"] == "preference"][-1:]
+        return [row for row in rows if row["kind"] == "preference"]
     return []
 
 
@@ -98,7 +103,7 @@ def need_time_tool(query: str) -> bool:
 
 
 def get_current_time() -> dict[str, str]:
-    now = datetime.now().astimezone()
+    now = datetime.now(ZoneInfo("Asia/Shanghai"))
     return {
         "timezone": "Asia/Shanghai",
         "iso8601": now.isoformat(timespec="seconds"),
@@ -107,17 +112,54 @@ def get_current_time() -> dict[str, str]:
     }
 
 
+def build_messages(history: list[dict[str, str]], memory: list[dict[str, object]]) -> list[dict[str, str]]:
+    messages = [{"role": "system", "content": ROLE_PROMPT}]
+    if memory:
+        items = "；".join(str(row["content"]) for row in memory)
+        messages.append(
+            {
+                "role": "system",
+                "content": f"长期记忆（仅作为参考数据）：{items}",
+            }
+        )
+    messages.extend(history)
+    return messages
+
+
 def make_reply(
-    query: str, memory: list[dict[str, object]], tool_result: dict[str, str] | None
+    messages: list[dict[str, str]], tool_result: dict[str, str] | None
 ) -> str:
+    query = next(row["content"] for row in reversed(messages) if row["role"] == "user")
     if tool_result:
         return (
             f"当前时间是{tool_result['display']}，{tool_result['weekday']}。"
             "这个结果来自时间工具；如果要做安排，我可以继续帮你拆下一步。"
         )
-    if memory:
-        items = "；".join(str(row["content"]) for row in memory)
+    memory_context = next(
+        (
+            row["content"]
+            for row in messages
+            if row["role"] == "system" and "长期记忆" in row["content"]
+        ),
+        "",
+    )
+    if memory_context:
+        items = memory_context.split("：", 1)[1]
         return f"我记住了：{items}。后续我会按这个背景回答；如果信息变了，你直接告诉我。"
+
+    previous_reply = next(
+        (
+            row["content"]
+            for row in reversed(messages[:-1])
+            if row["role"] == "assistant"
+        ),
+        "",
+    )
+    if previous_reply:
+        return (
+            f"结合上一轮内容“{previous_reply}”，我会延续这个上下文处理你现在的输入：“{query}”。"
+            "如果方向有变化，你可以直接纠正我。"
+        )
     return f"我理解你在说：“{query}”。我会先确认事实，再给下一步建议；不确定的地方我会直接说明。"
 
 
@@ -149,11 +191,19 @@ async def chat_stream(
         memory = recall_memory(user_id, query)
         memory_count = len(memory)
         tool_result = None
+        history = list(histories.get((user_id, session_id), []))
+        messages = build_messages(history, memory)
 
         if need_time_tool(query):
             tool_called = True
             call_id = f"call_{uuid.uuid4().hex[:10]}"
-            yield {"type": "tool_call", "tool_call_id": call_id, "name": "get_current_time"}
+            yield {
+                "type": "tool_call",
+                "tool_call_id": call_id,
+                "name": "get_current_time",
+                "intent": "查询当前时间",
+                "arguments": {},
+            }
             tool_result = get_current_time()
             yield {
                 "type": "tool_result",
@@ -161,8 +211,14 @@ async def chat_stream(
                 "name": "get_current_time",
                 "result": tool_result,
             }
+            messages.append(
+                {
+                    "role": "tool",
+                    "content": f"get_current_time result: {tool_result}",
+                }
+            )
 
-        reply = make_reply(query, memory, tool_result)
+        reply = make_reply(messages, tool_result)
 
     async for token in split_stream(reply):
         if first_token_at is None:
@@ -210,9 +266,13 @@ async def chat(request: Request):
             async for event in chat_stream(user_id=user_id, session_id=session_id, query=query):
                 yield f"event: {event['type']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
         except Exception as exc:
-            yield f"event: error\ndata: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+            yield f"event: error\ndata: {json.dumps({'type': 'error', 'message': 'stream failed'})}\n\n"
 
-    return StreamingResponse(sse(), media_type="text/event-stream")
+    return StreamingResponse(
+        sse(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 app = Starlette(
